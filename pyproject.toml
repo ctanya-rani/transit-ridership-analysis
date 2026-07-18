@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transit-analytics"
+version = "0.1.0"
+description = "Transit ridership analytics on GTFS data (modeled on Seattle Sound Transit)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tanya Rani" }]
+keywords = ["gtfs", "transit", "ridership", "analytics"]
+
+[project.scripts]
+transit-analytics = "transit_analytics.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Generated data and outputs
+demo/
+*.db
+*.sqlite
+dashboard.html
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
