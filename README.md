@@ -12,6 +12,8 @@ or any other agency — ingests through the same path.
 
 ## Quick start
 
+### Local
+
 ```bash
 pip install -e .
 transit-analytics demo          # full pipeline into ./demo/
@@ -21,6 +23,14 @@ open demo/dashboard.html
 The demo builds the sample feed, ingests it into SQLite, simulates 28 days
 of APC-style ridership, prints the analytics report, and writes the
 dashboard.
+
+### Live web app
+
+Deploy for free to Vercel + Railway in ~5 minutes: [**DEPLOYMENT.md**](DEPLOYMENT.md)
+
+Once live, you get a shareable link to:
+- View the demo dataset instantly
+- Upload any GTFS feed (zip file) and get a dashboard
 
 ## The pipeline, step by step
 
@@ -91,6 +101,8 @@ src/transit_analytics/
   dashboard.py    single-file HTML dashboard, light/dark, tooltips
   cli.py          transit-analytics entry point
 tests/            pytest suite (42 tests)
+web/              Next.js frontend (Vercel-ready)
+api/              FastAPI backend (Railway/Fly.io-ready)
 ```
 
 ## Development

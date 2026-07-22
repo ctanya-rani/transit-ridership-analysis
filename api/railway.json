@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "nixpacks",
+    "buildCommand": "pip install -r requirements.txt && cd .. && pip install -e ."
+  },
+  "deploy": {
+    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
+    "restartPolicyCondition": "on-failure",
+    "restartPolicyMaxRetries": 5
+  }
+}

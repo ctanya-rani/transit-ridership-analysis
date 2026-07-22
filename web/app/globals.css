@@ -1,0 +1,80 @@
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb; --page: #f9f9f7;
+  --text-primary: #0b0b0b; --text-secondary: #52514e;
+  --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --page: #0d0d0d;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7;
+    --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px; line-height: 1.45;
+}
+
+main { max-width: 1080px; margin: 0 auto; padding: 24px 20px 48px; }
+h1 { font-size: 28px; margin: 0 0 8px; font-weight: 700; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.subtitle { color: var(--text-secondary); margin: 0 0 20px; }
+.badge {
+  display: inline-block; padding: 4px 12px; border: 1px solid var(--border);
+  border-radius: 999px; font-size: 12px; background: var(--surface-1);
+}
+
+.section {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 20px; margin-bottom: 20px;
+}
+
+.upload-area {
+  border: 2px dashed var(--border); border-radius: 10px; padding: 40px 20px;
+  text-align: center; cursor: pointer; transition: all 0.2s;
+}
+.upload-area:hover { background: rgba(42, 120, 214, 0.05); }
+.upload-area.drag { background: rgba(42, 120, 214, 0.1); }
+
+input[type="file"] { display: none; }
+
+button {
+  background: #2a78d6; color: white; border: none; border-radius: 6px;
+  padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: opacity 0.2s;
+}
+button:hover { opacity: 0.9; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.progress {
+  width: 100%; height: 4px; background: var(--grid); border-radius: 2px;
+  overflow: hidden; margin: 12px 0;
+}
+.progress-bar {
+  height: 100%; background: #2a78d6; animation: pulse 1.5s infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+
+.error {
+  background: #ffe0e0; color: #8b0000; padding: 12px 16px;
+  border-radius: 6px; margin: 12px 0; border-left: 4px solid #d03b3b;
+}
+
+.dashboard-container { border-radius: 10px; overflow: hidden; }
+
+.info-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px; margin-bottom: 20px;
+}
+
+.info-tile {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px;
+}
+.info-label { color: var(--text-secondary); font-size: 12px; }
+.info-value { font-size: 24px; font-weight: 600; margin-top: 4px; }
