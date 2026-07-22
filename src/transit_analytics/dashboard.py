@@ -17,9 +17,15 @@ from .charts import (
     compact_number,
     legend,
     line_chart,
+    safe_json,
     stat_tile,
     truncate,
 )
+
+# Cap how many per-route load-profile charts get pre-rendered into the page
+# — each is a full inline SVG + JSON payload, so an agency with hundreds of
+# routes shouldn't bloat the file for a drill-down most viewers won't open.
+MAX_LOAD_PROFILE_ROUTES = 20
 
 STYLE = """
 :root {
@@ -98,12 +104,40 @@ svg .crosshair { stroke: var(--axis); stroke-width: 1; }
 .tooltip .tt-value { font-weight: 600; margin-left: auto; padding-left: 12px;
   font-variant-numeric: tabular-nums; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid);
+  white-space: nowrap; }
 th { color: var(--text-secondary); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-scroll { overflow-x: auto; margin: 0 -2px; padding: 0 2px; }
 details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px;
   margin-top: 10px; }
 footer { color: var(--text-muted); font-size: 12px; margin-top: 24px; }
+
+.card-head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; }
+.export-btn {
+  background: transparent; color: var(--text-secondary); font-size: 12px;
+  font-weight: 500; border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 10px; cursor: pointer; white-space: nowrap;
+}
+.export-btn:hover { color: var(--text-primary); border-color: var(--axis); }
+
+.route-picker-row { margin-bottom: 12px; }
+select.route-picker {
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  font-size: 13px; max-width: 100%; font-family: inherit;
+}
+.load-profile-panel[hidden] { display: none; }
+
+@media (max-width: 640px) {
+  main { padding: 16px 12px 32px; }
+  h1 { font-size: 19px; }
+  .tile-value { font-size: 24px; }
+  .card { padding: 14px; }
+  .tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+  .card-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+}
 """
 
 SCRIPT = """
@@ -189,14 +223,87 @@ document.querySelectorAll('[data-viz="bar"]').forEach(function (wrap) {
     bar.addEventListener('pointerleave', function () { tooltip.hidden = true; });
   });
 });
+
+function csvCell(value) {
+  if (value === null || value === undefined) value = '';
+  return '"' + String(value).replace(/"/g, '""') + '"';
+}
+function toCsv(rows) {
+  if (!rows.length) return '';
+  var cols = Object.keys(rows[0]);
+  var lines = [cols.map(csvCell).join(',')];
+  rows.forEach(function (row) {
+    lines.push(cols.map(function (c) { return csvCell(row[c]); }).join(','));
+  });
+  return lines.join('\\r\\n');
+}
+document.querySelectorAll('[data-export]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var dataEl = document.getElementById('export-data');
+    if (!dataEl) return;
+    var dataset = JSON.parse(dataEl.textContent)[btn.dataset.export] || [];
+    var blob = new Blob([toCsv(dataset)], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = btn.dataset.filename || (btn.dataset.export + '.csv');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+});
+
+var routePicker = document.getElementById('route-picker');
+if (routePicker) {
+  routePicker.addEventListener('change', function () {
+    document.querySelectorAll('.load-profile-panel').forEach(function (panel) {
+      panel.hidden = panel.dataset.route !== routePicker.value;
+    });
+  });
+}
 """
+
+
+def _route_load_profiles(conn: sqlite3.Connection, routes: list[dict]) -> tuple[str, str]:
+    """Build the <option>s and pre-rendered (hidden) charts for the route
+    load-profile picker: average onboard load by stop, direction 0 (falling
+    back to direction 1 for routes with no direction-0 service).
+    """
+    options: list[str] = []
+    panels: list[str] = []
+    for r in routes[:MAX_LOAD_PROFILE_ROUTES]:
+        route_id = r["route_id"]
+        profile = analytics.route_load_profile(conn, route_id, direction_id=0)
+        if not profile:
+            profile = analytics.route_load_profile(conn, route_id, direction_id=1)
+        if not profile:
+            continue
+        label = f"{r['short_name']} · {truncate(str(r['long_name']), 40)}"
+        selected = " selected" if not options else ""
+        options.append(
+            f'<option value="{escape(route_id)}"{selected}>{escape(label)}</option>'
+        )
+        chart = line_chart(
+            [{"name": "Avg onboard load", "color_var": "--series-1",
+              "values": [p["avg_load"] for p in profile]}],
+            x_labels=[truncate(p["stop_name"], 12) for p in profile],
+            chart_id=f"load-{route_id}",
+        )
+        hidden = "" if not panels else " hidden"
+        panels.append(
+            f'<div class="load-profile-panel" data-route="{escape(route_id)}"'
+            f"{hidden}>{chart}</div>"
+        )
+    return "".join(options), "".join(panels)
 
 
 def render(conn: sqlite3.Connection, title: str = "Transit Ridership Analytics") -> str:
     summary = analytics.system_summary(conn)
     daily = analytics.daily_boardings(conn)
     routes = analytics.boardings_by_route(conn)
-    stops = analytics.top_stops(conn, limit=12)
+    stops_full = analytics.top_stops(conn, limit=50)
+    stops = stops_full[:12]
     hourly = analytics.hourly_profile(conn)
     headways = analytics.route_headways(conn)
 
@@ -256,6 +363,12 @@ def render(conn: sqlite3.Connection, title: str = "Transit Ridership Analytics")
         chart_id="stops",
     )
 
+    route_picker_html, load_profile_panels = _route_load_profiles(conn, routes)
+
+    export_data = safe_json(
+        {"daily": daily, "routes": routes, "stops": stops_full}
+    )
+
     headway_rows = "".join(
         f"<tr><td>{escape(h['short_name'])}</td>"
         f"<td class='num'>{h['trips_per_weekday']}</td>"
@@ -292,7 +405,12 @@ def render(conn: sqlite3.Connection, title: str = "Transit Ridership Analytics")
 <div class="tiles">{tiles}</div>
 
 <div class="card">
-  <h2>Daily boardings</h2>
+  <div class="card-head">
+    <h2>Daily boardings</h2>
+    <button class="export-btn" data-export="daily" data-filename="daily_boardings.csv">
+      Export CSV
+    </button>
+  </div>
   <p class="desc">Systemwide boardings per service day. Weekend dips and the
   holiday exception are visible in the trace.</p>
   {daily_chart}
@@ -311,27 +429,51 @@ def render(conn: sqlite3.Connection, title: str = "Transit Ridership Analytics")
     {route_bars}
   </div>
   <div class="card">
-    <h2>Busiest stops</h2>
+    <div class="card-head">
+      <h2>Busiest stops</h2>
+      <button class="export-btn" data-export="stops" data-filename="top_stops.csv">
+        Export CSV
+      </button>
+    </div>
     {stop_bars}
   </div>
 </div>
 
+{f'''<div class="card">
+  <h2>Route load profile</h2>
+  <p class="desc">Average onboard load by stop, one direction per route.
+  Pick a route to see where it fills up and empties out.</p>
+  <div class="route-picker-row">
+    <select class="route-picker" id="route-picker">{route_picker_html}</select>
+  </div>
+  {load_profile_panels}
+</div>''' if route_picker_html else ''}
+
 <div class="card">
-  <h2>Route performance</h2>
-  <table>
-    <thead><tr><th>Route</th><th>Corridor</th>
-    <th class="num">Boardings/day</th><th class="num">Trips/day</th>
-    <th class="num">Boardings/trip</th><th class="num">Boardings/rev-hr</th></tr></thead>
-    <tbody>{route_table_rows}</tbody>
-  </table>
+  <div class="card-head">
+    <h2>Route performance</h2>
+    <button class="export-btn" data-export="routes" data-filename="route_performance.csv">
+      Export CSV
+    </button>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Route</th><th>Corridor</th>
+      <th class="num">Boardings/day</th><th class="num">Trips/day</th>
+      <th class="num">Boardings/trip</th><th class="num">Boardings/rev-hr</th></tr></thead>
+      <tbody>{route_table_rows}</tbody>
+    </table>
+  </div>
   <details>
     <summary>Scheduled weekday headways</summary>
-    <table>
-      <thead><tr><th>Route</th><th class="num">Trips/weekday</th>
-      <th class="num">Min headway (min)</th><th class="num">Median headway (min)</th>
-      <th>Service span</th></tr></thead>
-      <tbody>{headway_rows}</tbody>
-    </table>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Route</th><th class="num">Trips/weekday</th>
+        <th class="num">Min headway (min)</th><th class="num">Median headway (min)</th>
+        <th>Service span</th></tr></thead>
+        <tbody>{headway_rows}</tbody>
+      </table>
+    </div>
   </details>
 </div>
 
@@ -339,6 +481,7 @@ def render(conn: sqlite3.Connection, title: str = "Transit Ridership Analytics")
 modeled from the schedule and clearly labeled; load real APC data with
 <code>transit-analytics load-apc</code>.</footer>
 </main>
+<script type="application/json" id="export-data">{export_data}</script>
 <script>{SCRIPT}</script>
 </body>
 </html>

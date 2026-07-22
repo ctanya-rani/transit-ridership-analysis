@@ -3,7 +3,9 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Transit Ridership Analytics',
-  description: 'Analyze GTFS ridership data',
+  description:
+    'Upload any GTFS feed — or explore the bundled Sound Transit-modeled ' +
+    'demo — and get an interactive ridership dashboard.',
 }
 
 export default function RootLayout({

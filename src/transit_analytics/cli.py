@@ -31,11 +31,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     conn = gtfs.connect(args.db)
-    written = ridership.simulate(
-        conn, start=args.start, days=args.days, seed=args.seed
-    )
+    start, days = args.start, args.days
+    if start is None or days is None:
+        auto_start, auto_days = gtfs.pick_simulation_window(conn)
+        start = start or auto_start
+        days = days or auto_days
+        print(f"Auto-detected simulation window from feed calendar: "
+              f"{days} days starting {start}")
+    written = ridership.simulate(conn, start=start, days=days, seed=args.seed)
     print(f"Simulated {written:,} stop-level APC records "
-          f"({args.days} days from {args.start}, seed={args.seed})")
+          f"({days} days from {start}, seed={args.seed})")
     return 0
 
 
@@ -144,9 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("simulate", help="generate simulated APC ridership")
     p.add_argument("--db", default="transit.db")
-    p.add_argument("--start", type=_parse_date, default=date(2026, 3, 2),
-                   help="first service date (YYYY-MM-DD)")
-    p.add_argument("--days", type=int, default=28)
+    p.add_argument("--start", type=_parse_date, default=None,
+                   help="first service date (YYYY-MM-DD); default: "
+                        "auto-detected from the feed's calendar")
+    p.add_argument("--days", type=int, default=None,
+                   help="default: up to 28, bounded by the feed's calendar window")
     p.add_argument("--seed", type=int, default=42)
     p.set_defaults(func=cmd_simulate)
 
@@ -178,7 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except gtfs.GTFSValidationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

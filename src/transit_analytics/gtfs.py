@@ -17,7 +17,7 @@ import io
 import sqlite3
 import zipfile
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -30,6 +30,24 @@ CORE_FILES = {
     "calendar.txt",
     "calendar_dates.txt",
 }
+
+# Files without which the feed can't produce any useful analytics.
+REQUIRED_FILES = ("routes.txt", "stops.txt", "trips.txt", "stop_times.txt")
+# At least one of calendar.txt / calendar_dates.txt must define service days.
+CALENDAR_FILES = ("calendar.txt", "calendar_dates.txt")
+
+REQUIRED_COLUMNS = {
+    "routes.txt": ("route_id",),
+    "stops.txt": ("stop_id",),
+    "trips.txt": ("trip_id", "route_id", "service_id"),
+    "stop_times.txt": ("trip_id", "stop_id", "stop_sequence"),
+    "calendar.txt": ("service_id", "start_date", "end_date"),
+    "calendar_dates.txt": ("service_id", "date", "exception_type"),
+}
+
+
+class GTFSValidationError(ValueError):
+    """A GTFS feed is missing required files, columns, or rows."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agency (
@@ -144,6 +162,32 @@ class FeedReader:
 
     source: Path
 
+    def available_files(self) -> set[str]:
+        if self.source.is_dir():
+            return {p.name for p in self.source.glob("*.txt")}
+        try:
+            with zipfile.ZipFile(self.source) as zf:
+                # Feeds are sometimes zipped with a wrapper folder; only keep
+                # the basename so "gtfs/routes.txt" still counts as routes.txt.
+                return {Path(n).name for n in zf.namelist() if n.endswith(".txt")}
+        except zipfile.BadZipFile as exc:
+            raise GTFSValidationError(
+                f"{self.source.name} is not a valid .zip archive"
+            ) from exc
+
+    def header(self, name: str) -> list[str]:
+        """Column names of the first row, or [] if the file is empty.
+
+        Only meaningful for files already confirmed present via
+        ``available_files()`` — ``open_table`` is a generator function, so
+        for a missing file this simply yields nothing rather than raising.
+        """
+        try:
+            first = next(iter(self.open_table(name)))
+        except StopIteration:
+            return []
+        return list(first.keys())
+
     def open_table(self, name: str) -> Iterator[dict[str, str]] | None:
         if self.source.is_dir():
             path = self.source / name
@@ -153,9 +197,12 @@ class FeedReader:
                 yield from csv.DictReader(fh)
         else:
             with zipfile.ZipFile(self.source) as zf:
-                if name not in zf.namelist():
+                match = next(
+                    (n for n in zf.namelist() if Path(n).name == name), None
+                )
+                if match is None:
                     return None
-                with zf.open(name) as raw:
+                with zf.open(match) as raw:
                     text = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
                     yield from csv.DictReader(text)
 
@@ -165,12 +212,65 @@ def _rows(reader: FeedReader, name: str) -> Iterable[dict[str, str]]:
     return table if table is not None else ()
 
 
+def validate_feed(reader: FeedReader) -> None:
+    """Raise GTFSValidationError with a specific, actionable message.
+
+    Checks (in order, so the reader sees the most fundamental problem
+    first): the archive is readable, every required file is present, at
+    least one calendar source exists, and required columns are present in
+    each required file.
+    """
+    available = reader.available_files()
+
+    missing_required = [f for f in REQUIRED_FILES if f not in available]
+    if missing_required:
+        raise GTFSValidationError(
+            "GTFS feed is missing required file(s): "
+            + ", ".join(sorted(missing_required))
+            + ". A valid feed needs routes.txt, stops.txt, trips.txt and "
+            "stop_times.txt at minimum."
+        )
+
+    if not any(f in available for f in CALENDAR_FILES):
+        raise GTFSValidationError(
+            "GTFS feed has neither calendar.txt nor calendar_dates.txt, so "
+            "no service days can be determined."
+        )
+
+    for filename in REQUIRED_FILES:
+        header = set(reader.header(filename))
+        missing_cols = [c for c in REQUIRED_COLUMNS[filename] if c not in header]
+        if missing_cols:
+            raise GTFSValidationError(
+                f"{filename} is missing required column(s): "
+                + ", ".join(missing_cols)
+            )
+
+    for filename in CALENDAR_FILES:
+        if filename not in available:
+            continue
+        header = set(reader.header(filename))
+        missing_cols = [c for c in REQUIRED_COLUMNS[filename] if c not in header]
+        if missing_cols:
+            raise GTFSValidationError(
+                f"{filename} is missing required column(s): "
+                + ", ".join(missing_cols)
+            )
+
+
 def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]:
-    """Load a GTFS feed into the database. Returns row counts per table."""
+    """Load a GTFS feed into the database. Returns row counts per table.
+
+    Raises ``GTFSValidationError`` (a ``ValueError``) with a specific,
+    human-readable reason if the feed is missing required files/columns or
+    a row is malformed, rather than silently loading partial data or
+    surfacing a raw ``KeyError``/``zipfile`` traceback.
+    """
     source = Path(gtfs_path)
     if not source.exists():
         raise FileNotFoundError(f"GTFS feed not found: {source}")
     reader = FeedReader(source)
+    validate_feed(reader)
     counts: dict[str, int] = {}
 
     with conn:
@@ -194,6 +294,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "agency.txt")
             ),
+            table="agency.txt",
         )
         counts["routes"] = _insert_many(
             conn,
@@ -209,6 +310,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "routes.txt")
             ),
+            table="routes.txt",
         )
         counts["stops"] = _insert_many(
             conn,
@@ -223,6 +325,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "stops.txt")
             ),
+            table="stops.txt",
         )
         counts["trips"] = _insert_many(
             conn,
@@ -237,6 +340,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "trips.txt")
             ),
+            table="trips.txt",
         )
         counts["stop_times"] = _insert_many(
             conn,
@@ -253,6 +357,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "stop_times.txt")
             ),
+            table="stop_times.txt",
         )
         counts["calendar"] = _insert_many(
             conn,
@@ -266,6 +371,7 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 )
                 for r in _rows(reader, "calendar.txt")
             ),
+            table="calendar.txt",
         )
         counts["calendar_dates"] = _insert_many(
             conn,
@@ -274,12 +380,20 @@ def load_feed(gtfs_path: str | Path, conn: sqlite3.Connection) -> dict[str, int]
                 (r["service_id"], r["date"], int(r["exception_type"]))
                 for r in _rows(reader, "calendar_dates.txt")
             ),
+            table="calendar_dates.txt",
         )
     return counts
 
 
-def _insert_many(conn: sqlite3.Connection, sql: str, rows: Iterable[tuple]) -> int:
-    cursor = conn.executemany(sql, rows)
+def _insert_many(
+    conn: sqlite3.Connection, sql: str, rows: Iterable[tuple], table: str = "?"
+) -> int:
+    try:
+        cursor = conn.executemany(sql, rows)
+    except (KeyError, ValueError, TypeError) as exc:
+        raise GTFSValidationError(
+            f"malformed row in {table}: {exc}"
+        ) from exc
     return cursor.rowcount if cursor.rowcount >= 0 else 0
 
 
@@ -309,3 +423,61 @@ def service_ids_on(conn: sqlite3.Connection, day: date) -> set[str]:
 def date_range(start: date, days: int) -> Iterator[date]:
     for offset in range(days):
         yield start + timedelta(days=offset)
+
+
+def feed_date_bounds(conn: sqlite3.Connection) -> tuple[date, date] | None:
+    """Overall [earliest, latest] service date across calendar + calendar_dates.
+
+    Returns None if the feed defines no dates at all (shouldn't happen for a
+    feed that passed ``validate_feed``, but callers may hand in an empty db).
+    """
+    bounds: list[tuple[str, str]] = []
+    row = conn.execute(
+        "SELECT MIN(start_date) AS lo, MAX(end_date) AS hi FROM calendar"
+    ).fetchone()
+    if row and row["lo"] and row["hi"]:
+        bounds.append((row["lo"], row["hi"]))
+    row = conn.execute(
+        "SELECT MIN(date) AS lo, MAX(date) AS hi FROM calendar_dates"
+    ).fetchone()
+    if row and row["lo"] and row["hi"]:
+        bounds.append((row["lo"], row["hi"]))
+    if not bounds:
+        return None
+    lo = min(b[0] for b in bounds)
+    hi = max(b[1] for b in bounds)
+    try:
+        return (
+            datetime.strptime(lo, "%Y%m%d").date(),
+            datetime.strptime(hi, "%Y%m%d").date(),
+        )
+    except ValueError:
+        return None
+
+
+def pick_simulation_window(
+    conn: sqlite3.Connection, preferred_days: int = 28
+) -> tuple[date, int]:
+    """Pick a representative [start, days] window inside the feed's validity.
+
+    Prefers starting on a Monday (so a short window still captures a
+    weekday/weekend mix) and always stays within the feed's own calendar
+    bounds, so simulated ridership never silently comes back empty because
+    the window fell outside every service_id's date range.
+    """
+    bounds = feed_date_bounds(conn)
+    if bounds is None:
+        return date.today(), preferred_days
+    lo, hi = bounds
+    span_days = (hi - lo).days + 1
+    days = min(preferred_days, max(span_days, 1))
+
+    start = lo
+    while start.weekday() != 0 and (start - lo).days < 7:
+        candidate = start + timedelta(days=1)
+        if candidate + timedelta(days=days - 1) > hi:
+            break
+        start = candidate
+    if start + timedelta(days=days - 1) > hi:
+        start = max(lo, hi - timedelta(days=days - 1))
+    return start, days

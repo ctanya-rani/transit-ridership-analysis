@@ -13,6 +13,17 @@ from __future__ import annotations
 import json
 from html import escape
 
+
+def safe_json(data: object) -> str:
+    """JSON-encode for embedding inside a <script> tag.
+
+    Route/stop names ultimately come from an uploaded GTFS feed, so a value
+    containing the literal substring "</script>" must not be able to break
+    out of the tag. ``\\/`` is valid JSON/JS and round-trips through
+    ``JSON.parse`` unchanged.
+    """
+    return json.dumps(data).replace("</", "<\\/")
+
 BAR_MAX_THICKNESS = 24
 BAR_GAP = 8
 
@@ -51,11 +62,18 @@ def line_chart(
     x_tick_every: int | None = None,
     chart_id: str = "line",
 ) -> str:
-    """Multi-series line chart. series: [{name, color_var, values}]."""
-    pad_left, pad_right, pad_top, pad_bottom = 56, 16, 12, 28
+    """Multi-series line chart. series: [{name, color_var, values}].
+
+    X labels longer than 6 chars (e.g. stop names, vs. "00" hour ticks or
+    "01-05" dates) get fewer ticks and a -40° rotation instead of colliding
+    into each other — never left overlapping.
+    """
+    n = len(x_labels)
+    long_labels = any(len(str(lbl)) > 6 for lbl in x_labels)
+    pad_left, pad_right, pad_top = 56, 16, 12
+    pad_bottom = 48 if long_labels else 28
     plot_w = width - pad_left - pad_right
     plot_h = height - pad_top - pad_bottom
-    n = len(x_labels)
     max_v = max((max(s["values"]) for s in series if s["values"]), default=1) or 1
     ticks = _nice_ticks(max_v)
     scale_max = ticks[-1] or 1
@@ -73,13 +91,24 @@ def line_chart(
         f'text-anchor="end">{_fmt(t)}</text>'
         for t in ticks
     )
-    every = x_tick_every or max(1, n // 8)
-    x_axis = "".join(
-        f'<text x="{x_at(i):.1f}" y="{height - 8}" class="tick" '
-        f'text-anchor="middle">{escape(str(lbl))}</text>'
-        for i, lbl in enumerate(x_labels)
-        if i % every == 0
-    )
+    default_every = n // 5 if long_labels else n // 8
+    every = x_tick_every or max(1, default_every)
+    if long_labels:
+        label_y = height - pad_bottom + 16
+        x_axis = "".join(
+            f'<text x="{x_at(i):.1f}" y="{label_y}" class="tick" '
+            f'text-anchor="end" transform="rotate(-40 {x_at(i):.1f} {label_y})">'
+            f"{escape(str(lbl))}</text>"
+            for i, lbl in enumerate(x_labels)
+            if i % every == 0
+        )
+    else:
+        x_axis = "".join(
+            f'<text x="{x_at(i):.1f}" y="{height - 8}" class="tick" '
+            f'text-anchor="middle">{escape(str(lbl))}</text>'
+            for i, lbl in enumerate(x_labels)
+            if i % every == 0
+        )
     paths = []
     for s in series:
         points = " ".join(
@@ -123,7 +152,7 @@ def line_chart(
         f'y2="{pad_top + plot_h}" visibility="hidden"/>'
         f"</svg>"
         f'<script type="application/json" class="viz-data">'
-        f"{json.dumps(payload)}</script>"
+        f"{safe_json(payload)}</script>"
         f'<div class="tooltip" hidden></div>'
         f"</div>"
     )
