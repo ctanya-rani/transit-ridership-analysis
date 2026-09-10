@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+const FETCH_TIMEOUT_MS = 60000 // 60 seconds
 
 async function extractError(response: Response): Promise<string> {
   try {
@@ -12,6 +13,20 @@ async function extractError(response: Response): Promise<string> {
     // response wasn't JSON — fall through to the generic message
   }
   return `${response.status} ${response.statusText}`
+}
+
+function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timeoutId))
+    .catch(err => {
+      if (err.name === 'AbortError') {
+        throw new Error('Request timed out after 60 seconds')
+      }
+      throw err
+    })
 }
 
 const UPLOAD_STAGES = [
@@ -33,6 +48,13 @@ export default function Home() {
   const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL
+
+  useEffect(() => {
+    // Warn if API URL is not configured in production
+    if (!apiUrl && process.env.NODE_ENV === 'production' && !dashboard && !error) {
+      setError('API endpoint not configured. Set NEXT_PUBLIC_API_URL environment variable.')
+    }
+  }, [apiUrl, dashboard, error])
 
   const beginStagedMessages = () => {
     let i = 0
@@ -82,11 +104,15 @@ export default function Home() {
   }, [dashboard])
 
   const loadDemo = async () => {
+    if (!apiUrl) {
+      setError('API endpoint not configured. Set NEXT_PUBLIC_API_URL environment variable.')
+      return
+    }
     setLoading('demo')
     setLoadingStage('Loading demo dataset…')
     setError('')
     try {
-      const response = await fetch(`${apiUrl}/api/demo`)
+      const response = await fetchWithTimeout(`${apiUrl}/api/demo`)
       if (!response.ok) throw new Error(await extractError(response))
       setDashboard(await response.text())
       setDashboardLabel('Demo dataset')
@@ -135,6 +161,10 @@ export default function Home() {
 
   const uploadAndProcess = async () => {
     if (!file) return
+    if (!apiUrl) {
+      setError('API endpoint not configured. Set NEXT_PUBLIC_API_URL environment variable.')
+      return
+    }
     setLoading('upload')
     setError('')
     beginStagedMessages()
@@ -143,10 +173,10 @@ export default function Home() {
     formData.append('file', file)
 
     try {
-      const response = await fetch(`${apiUrl}/api/upload`, {
+      const response = await fetchWithTimeout(`${apiUrl}/api/upload`, {
         method: 'POST',
         body: formData,
-      })
+      }, 300000) // 5 minute timeout for large uploads
       if (!response.ok) throw new Error(await extractError(response))
       setDashboard(await response.text())
       setDashboardLabel(file.name)
@@ -228,6 +258,8 @@ export default function Home() {
               type="file"
               accept=".zip"
               onChange={handleFileSelect}
+              aria-label="Select GTFS feed .zip file"
+              style={{ display: 'none' }}
             />
             {file && (
               <button
@@ -243,7 +275,11 @@ export default function Home() {
             )}
           </div>
 
-          {error && <div className="error">{error}</div>}
+          {error && (
+            <div className="error" role="alert" aria-live="polite">
+              {error}
+            </div>
+          )}
 
           <footer>
             Feeds are processed in memory and simulated ridership is clearly labeled —

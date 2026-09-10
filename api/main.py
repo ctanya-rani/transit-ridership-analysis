@@ -88,10 +88,20 @@ class _LRUCache:
 _cache = _LRUCache(CACHE_CAPACITY)
 
 
-def _build_demo_db() -> str:
+def _get_demo_db() -> str:
+    """Get or lazily build the demo database.
+
+    If DEMO_DB env var is set, use that pre-built database (deploy optimization).
+    Otherwise, build it on first access (lazy initialization) to avoid blocking
+    startup when running locally or in cold-start environments.
+    """
+    if "DEMO_DB" in os.environ:
+        return os.environ["DEMO_DB"]
+
     demo_dir = Path(tempfile.gettempdir()) / "transit_demo"
     demo_dir.mkdir(exist_ok=True)
     db_path = demo_dir / "demo.db"
+
     if not db_path.exists():
         feed_dir = demo_dir / "gtfs"
         sample_feed.build_feed(feed_dir)
@@ -100,10 +110,8 @@ def _build_demo_db() -> str:
         start, days = gtfs.pick_simulation_window(conn)
         ridership.simulate(conn, start=start, days=days, seed=42)
         conn.close()
+
     return str(db_path)
-
-
-DEMO_DB = os.environ.get("DEMO_DB") or _build_demo_db()
 
 
 @app.get("/", tags=["meta"])
@@ -128,7 +136,8 @@ def health():
 def demo():
     """Render the dashboard for the bundled Sound Transit-modeled sample feed."""
     try:
-        conn = gtfs.connect(DEMO_DB)
+        demo_db = _get_demo_db()
+        conn = gtfs.connect(demo_db)
         html = dashboard.render(conn, title="Transit Analytics (Demo Data)")
         conn.close()
         return html
